@@ -1,0 +1,124 @@
+diff -up kexec-tools-2.0.0/kexec/arch/ppc64/crashdump-ppc64.h.orig kexec-tools-2.0.0/kexec/arch/ppc64/crashdump-ppc64.h
+--- kexec-tools-2.0.0/kexec/arch/ppc64/crashdump-ppc64.h.orig	2008-07-14 07:28:19.000000000 -0400
++++ kexec-tools-2.0.0/kexec/arch/ppc64/crashdump-ppc64.h	2009-11-02 13:08:55.000000000 -0500
+@@ -23,6 +23,8 @@ void add_usable_mem_rgns(unsigned long l
+ #define _ALIGN_UP(addr,size)	(((addr)+((size)-1))&(~((size)-1)))
+ #define _ALIGN_DOWN(addr,size)	((addr)&(~((size)-1)))
+ 
++#define KERNEL_RUN_AT_ZERO_MAGIC 0x72756e30	/* "run0" */
++
+ extern uint64_t crash_base;
+ extern uint64_t crash_size;
+ extern unsigned int rtas_base;
+diff -up kexec-tools-2.0.0/kexec/arch/ppc64/fs2dt.c.orig kexec-tools-2.0.0/kexec/arch/ppc64/fs2dt.c
+--- kexec-tools-2.0.0/kexec/arch/ppc64/fs2dt.c.orig	2008-07-14 07:28:19.000000000 -0400
++++ kexec-tools-2.0.0/kexec/arch/ppc64/fs2dt.c	2009-11-02 13:08:55.000000000 -0500
+@@ -41,7 +41,7 @@
+ 
+ static char pathname[MAXPATH], *pathstart;
+ static char propnames[NAMESPACE] = { 0 };
+-static unsigned dtstruct[TREEWORDS], *dt;
++static unsigned dtstruct[TREEWORDS] __attribute__ ((aligned (8))), *dt;
+ static unsigned long long mem_rsrv[2*MEMRESERVE] = { 0, 0 };
+ 
+ static int crash_param = 0;
+diff -up kexec-tools-2.0.0/kexec/arch/ppc64/kexec-elf-ppc64.c.orig kexec-tools-2.0.0/kexec/arch/ppc64/kexec-elf-ppc64.c
+--- kexec-tools-2.0.0/kexec/arch/ppc64/kexec-elf-ppc64.c.orig	2008-07-14 07:28:19.000000000 -0400
++++ kexec-tools-2.0.0/kexec/arch/ppc64/kexec-elf-ppc64.c	2009-11-02 13:08:55.000000000 -0500
+@@ -92,6 +92,7 @@ int elf_ppc64_load(int argc, char **argv
+ 	unsigned int my_panic_kernel;
+ 	uint64_t my_stack, my_backup_start;
+ 	uint64_t toc_addr;
++	uint32_t my_run_at_load;
+ 	unsigned int slave_code[256/sizeof (unsigned int)], master_entry;
+ 
+ #define OPT_APPEND     (OPT_ARCH_MAX+0)
+@@ -307,6 +308,18 @@ int elf_ppc64_load(int argc, char **argv
+ 		my_backup_start = info->backup_start;
+ 		elf_rel_set_symbol(&info->rhdr, "backup_start",
+ 				&my_backup_start, sizeof(my_backup_start));
++
++		/* Tell relocatable kernel to run at load address
++		 * via word before slave code in purgatory
++		 */
++
++		elf_rel_get_symbol(&info->rhdr, "run_at_load", &my_run_at_load,
++				sizeof(my_run_at_load));
++		if (my_run_at_load == KERNEL_RUN_AT_ZERO_MAGIC)
++			my_run_at_load = 1;
++			/* else it should be a fixed offset image */
++		elf_rel_set_symbol(&info->rhdr, "run_at_load", &my_run_at_load,
++				sizeof(my_run_at_load));
+ 	}
+ 
+ 	/* Set stack address */
+@@ -325,10 +338,13 @@ int elf_ppc64_load(int argc, char **argv
+ 	my_backup_start = 0;
+ 	my_stack = 0;
+ 	toc_addr = 0;
++	my_run_at_load = 0;
+ 
+ 	elf_rel_get_symbol(&info->rhdr, "kernel", &my_kernel, sizeof(my_kernel));
+ 	elf_rel_get_symbol(&info->rhdr, "dt_offset", &my_dt_offset,
+ 				sizeof(my_dt_offset));
++	elf_rel_get_symbol(&info->rhdr, "run_at_load", &my_run_at_load,
++				sizeof(my_run_at_load));
+ 	elf_rel_get_symbol(&info->rhdr, "panic_kernel", &my_panic_kernel,
+ 				sizeof(my_panic_kernel));
+ 	elf_rel_get_symbol(&info->rhdr, "backup_start", &my_backup_start,
+@@ -340,6 +356,7 @@ int elf_ppc64_load(int argc, char **argv
+ 	fprintf(stderr, "info->entry is %p\n", info->entry);
+ 	fprintf(stderr, "kernel is %lx\n", my_kernel);
+ 	fprintf(stderr, "dt_offset is %lx\n", my_dt_offset);
++	fprintf(stderr, "run_at_load flag is %x\n", my_run_at_load);
+ 	fprintf(stderr, "panic_kernel is %x\n", my_panic_kernel);
+ 	fprintf(stderr, "backup_start is %lx\n", my_backup_start);
+ 	fprintf(stderr, "stack is %lx\n", my_stack);
+diff -up kexec-tools-2.0.0/kexec/arch/ppc64/kexec-elf-rel-ppc64.c.orig kexec-tools-2.0.0/kexec/arch/ppc64/kexec-elf-rel-ppc64.c
+--- kexec-tools-2.0.0/kexec/arch/ppc64/kexec-elf-rel-ppc64.c.orig	2008-07-14 07:28:19.000000000 -0400
++++ kexec-tools-2.0.0/kexec/arch/ppc64/kexec-elf-rel-ppc64.c	2009-11-02 13:08:55.000000000 -0500
+@@ -60,6 +60,10 @@ void machine_apply_elf_rel(struct mem_eh
+ 		*(uint64_t *)location = value;
+ 		break;
+ 
++	case R_PPC64_REL32:
++		*(uint32_t *)location = value - (uint32_t)location;
++		break;
++
+ 	case R_PPC64_TOC:
+ 		*(uint64_t *)location = my_r2(ehdr);
+ 		break;
+diff -up kexec-tools-2.0.0/purgatory/arch/ppc64/v2wrap.S.orig kexec-tools-2.0.0/purgatory/arch/ppc64/v2wrap.S
+--- kexec-tools-2.0.0/purgatory/arch/ppc64/v2wrap.S.orig	2008-07-14 07:28:19.000000000 -0400
++++ kexec-tools-2.0.0/purgatory/arch/ppc64/v2wrap.S	2009-11-02 13:08:55.000000000 -0500
+@@ -49,6 +49,11 @@
+ 	.machine ppc64
+ 	.globl purgatory_start
+ purgatory_start:	b	master
++	.org purgatory_start + 0x5c     # ABI: possible run_at_load flag at 0x5c
++	.globl run_at_load
++run_at_load:
++	.long 0
++	.size run_at_load, . - run_at_load
+ 	.org purgatory_start + 0x60     # ABI: slaves start at 60 with r3=phys
+ slave:	b $
+ 	.org purgatory_start + 0x100    # ABI: end of copied region
+@@ -56,7 +61,7 @@ slave:	b $
+ 
+ #
+ # The above 0x100 bytes at purgatory_start are replaced with the
+-# code from the kernel (or next stage) by kexec/arch/ppc64/kexec-ppc64.c
++# code from the kernel (or next stage) by kexec/arch/ppc64/kexec-elf-ppc64.c
+ #
+ 
+ master:
+@@ -90,6 +95,9 @@ master:
+ 80:
+ 	LOADADDR(6,kernel)
+ 	ld      4,0(6)          # load the kernel address
++	LOADADDR(6,run_at_load) # the load flag
++	lwz     7,0(6)          # possibly patched by kexec-elf-ppc64
++	stw     7,0x5c(4)       # and patch it into the kernel
+ 	li	5,0		# r5 will be 0 for kernel
+ 	mtctr	4		# prepare branch too
+ 	mr      3,16            # restore dt address

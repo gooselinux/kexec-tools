@@ -1,0 +1,12 @@
+--- kexec-tools-2.0.0/kexec/arch/ppc/Makefile	2010-03-02 11:37:26.248672993 -0500
++++ kexec-tools-2.0.0/kexec/arch/ppc/Makefile	2010-03-02 11:40:47.488673900 -0500
+@@ -8,6 +8,8 @@ ppc_KEXEC_SRCS += kexec/arch/ppc/kexec-d
+ ppc_KEXEC_SRCS += kexec/arch/ppc/ppc-setup-simple.S
+ ppc_KEXEC_SRCS += kexec/arch/ppc/ppc-setup-dol.S
+ 
++ASFLAGS		+= -Wa,--noexecstack
++
+ dist += kexec/arch/ppc/Makefile $(ppc_KEXEC_SRCS)			\
+ 	kexec/arch/ppc/kexec-ppc.h kexec/arch/ppc/ppc_asm.h		\
+ 	kexec/arch/ppc/include/arch/options.h
+

@@ -1,0 +1,554 @@
+Kexec/Kdump HOWTO
+
+Introduction
+
+Kexec and kdump are new features in the 2.6 mainstream kernel. These features
+are included in Red Hat Enterprise Linux 5. The purpose of these features
+is to ensure faster boot up and creation of reliable kernel vmcores for
+diagnostic purposes.
+
+Overview
+
+Kexec
+
+Kexec is a fastboot mechanism which allows booting a Linux kernel from the
+context of already running kernel without going through BIOS. BIOS can be very
+time consuming especially on the big servers with lots of peripherals. This can
+save a lot of time for developers who end up booting a machine numerous times.
+
+Kdump
+
+Kdump is a new kernel crash dumping mechanism and is very reliable because
+the crash dump is captured from the context of a freshly booted kernel and
+not from the context of the crashed kernel. Kdump uses kexec to boot into
+a second kernel whenever system crashes. This second kernel, often called
+a capture kernel, boots with very little memory and captures the dump image.
+
+The first kernel reserves a section of memory that the second kernel uses
+to boot. Kexec enables booting the capture kernel without going through BIOS
+hence contents of first kernel's memory are preserved, which is essentially
+the kernel crash dump.
+
+Kdump is supported on the i686, x86_64, ia64 and ppc64 platforms. The
+standard kernel and capture kernel are one in the same on i686, x86_64,
+ia64 and ppc64.
+
+If you're reading this document, you should already have kexec-tools
+installed. If not, you install it via the following command:
+
+    # yum install kexec-tools
+
+Now load a kernel with kexec:
+
+    # kver=`uname -r` 
+    # kexec -l /boot/vmlinuz-$kver \
+    --initrd=/boot/initrd-$kver.img \
+        --command-line="`cat /proc/cmdline`"
+
+NOTE: The above will boot you back into the kernel you're currently running,
+if you want to load a different kernel, substitute it in place of `uname -r`.
+
+Now reboot your system, taking note that it should bypass the BIOS:
+
+    # reboot
+
+
+Kdump Operational Flow
+
+Given its purpose, kdump must provide both flexibility in dump capture
+configuration, resiliance to errors encountered during the capture
+process, and a default out-of-the box configuration that allows for
+rudimentary captures to work without any addition setup.  Given these
+constraints, kdump implements its capture process in two stages:
+
+A) An initramfs, which attempts to capture the vmcore without having to touch
+the systems rootfs data
+
+B) An initscript stored on the rootfs, which captures a vmcore using a simple
+copy operation to the local /var/crash directory (if a capture is needed) when
+the kdump service starts.
+
+(A) is the recommended capture approach, as it is the most likely to succeded
+(its resilient to corruption in the root filesystem).  It uses the stored
+configuration in /etc/kdump.conf to control its actions.  (B) serves as both
+the default configuration action (when no /etc/kdump.conf configuration is
+provided, the kdump initramfs acts just as the normal kernel initramfs does,
+mounting the rootfs, and runing /sbin/init so that the kdump initscript can be
+executed).  This is also the default behavior should the configured capture
+process fail in (A).  Note that when using (B), all settings in
+/etc/kdump.conf are ignored.  This is because (B) is meant to be used as a
+last ditch capture effort.  We are using method (B) beacuse we are either
+using the default configuration, or something went wrong with the applied
+configuration.  In either case, no special settings are honored, we simply
+attempt to capture the core in as simple a manner as possible.
+
+the control flow between the two works as follows:
+1) System panics
+2) kdump kernel boots
+3) kdump initramfs loads and runs /init
+4) is a dump target configured in /etc/kdump.conf. If not, determine the 
+   root filesystem block device and use that as the default dump target
+5) capture dump according to /etc/kdump.conf
+6) was capture successful (yes goto 12, no goto 7)
+7) does /etc/kdump.conf set default_action to halt (yes goto 14, no goto 8)
+8) does /etc/kdump.conf set default_action to reboot (yes goto 12, no goto 9)
+9) mount root filesystem, pivot_root, run /sbin/init
+10) start kdump service via /etc/init.d/kdump
+11) capture core via cp /proc/vmcore /var/crash/<host-addr>-<date>/vmcore
+12) reboot
+13) drop to shell
+14) halt system
+
+How to configure kdump:
+
+Again, we assume if you're reading this document, you should already have
+kexec-tools installed. If not, you install it via the following command:
+
+    # yum install kexec-tools
+
+To be able to do much of anything interesting in the way of debug analysis,
+you'll also need to install the kernel-debuginfo package, of the same arch
+as your running kernel, and the crash utility:
+
+    # yum --enablerepo=\*debuginfo install kernel-debuginfo.$(uname -m) crash
+
+Next up, we need to modify some boot parameters to reserve a chunk of memory for
+the capture kernel. For i686 and x86_64, edit /etc/grub.conf, and append
+"crashkernel=128M" to the end of your kernel line. Similarly, append the same to
+the append line in /etc/yaboot.conf for ppc64. On ia64, edit /etc/elilo.conf,
+adding "crashkernel=256M" to the append line for your kernel. Note that the X
+values are such that X = the amount of memory to reserve for the capture kernel.
+
+Note that there is an alternative form in which to specify a crashkernel
+memory reservation, in the event that more control is needed over the size and
+placement of the reserved memory.  The format is:
+
+crashkernel=range1:size1[,range2:size2,...][@offset]
+
+Where range<n> specifies a range of values that are matched against the amount
+of physical RAM present in the system, and the corresponding size<n> value
+specifies the amount of kexec memory to reserve.  For example:
+
+crashkernel=512M-2G:64M,2G-:128M
+
+This line tells kexec to reserve 64M of ram if the system contains between
+512M and 2G of physical memory.  If the system contains 2G or more of physical
+memory, 128M should be reserved.
+
+There is also a third specification for the crashkernel parameter:
+crashkernel=auto
+This specification allows the kernel to decide how much meory to reserve for the
+purposes of kdump.  It will make this determination based on the amount of
+memory you have in your system, and scale the allocation accordingly.  Note that
+if you have less than 4Gb of memory in your system, this specification will  opt
+to not allocate any memory for the purposes of kdump.
+
+Examples:
+# grub.conf generated by anaconda
+#
+# Note that you do not have to rerun grub after making changes to this file
+# NOTICE:  You have a /boot partition.  This means that
+#          all kernel and initrd paths are relative to /boot/, eg.
+#          root (hd0,0)
+#          kernel /vmlinuz-version ro root=/dev/VolGroup00/LogVol00
+#          initrd /initrd-version.img
+#boot=/dev/hda
+default=0
+timeout=5
+splashimage=(hd0,0)/grub/splash.xpm.gz
+hiddenmenu
+title Red Hat Enterprise Linux (2.6.18-8.el5)
+        root (hd0,0)
+        kernel /vmlinuz-2.6.18-8.el5 ro root=/dev/VolGroup00/LogVol00 crashkernel=128M@16M
+        initrd /initrd-2.6.18-8.el5.img
+
+# cat /etc/yaboot.conf
+# yaboot.conf generated by anaconda
+
+boot=/dev/sda1 
+init-message=Welcome to Red Hat Enterprise Linux!\nHit <TAB> for boot options
+partition=2
+timeout=80
+install=/usr/lib/yaboot/yaboot
+delay=5
+enablecdboot
+enableofboot
+enablenetboot
+nonvram
+fstype=raw
+
+image=/vmlinuz-2.6.17-1.2621.el5
+	label=linux read-only
+	initrd=/initrd-2.6.17-1.2621.el5.img
+	append="root=LABEL=/ crashkernel=128M"
+
+
+# cat /etc/elilo.conf
+prompt
+timeout=20
+default=2.6.17-1.2621.el5
+relocatable
+
+image=vmlinuz-2.6.17-1.2621.el5
+	label=2.6.17-1.2621.el5
+	initrd=initrd-2.6.17-1.2621.el5.img read-only
+	append="-- root=LABEL=/ crashkernel=256M"
+
+
+After making said changes, reboot your system, so that the X MB of memory is
+left untouched by the normal system, reserved for the capture kernel. Take note
+that the output of 'free -m' will show X MB less memory than without this
+parameter, which is expected. You may be able to get by with less than 128M, but
+testing with only 64M has proven unreliable of late. On ia64, as much as 512M
+may be required.
+
+Now that you've got that reserved memory region set up, you want to turn on
+the kdump init script:
+
+    # chkconfig kdump on
+
+Then, start up kdump as well:
+
+    # service kdump start
+
+This should load your kernel-kdump image via kexec, leaving the system ready
+to capture a vmcore upon crashing. To test this out, you can force-crash
+your system by echo'ing a c into /proc/sysrq-trigger:
+
+    # echo c > /proc/sysrq-trigger
+
+You should see some panic output, followed by the system restarting into
+the kdump kernel. When the boot process gets to the point where it starts
+the kdump service, your vmcore should be copied out to disk (by default,
+in /var/crash/<YYYY-MM-DD-HH:MM>/vmcore), then the system rebooted back into
+your normal kernel.
+
+Once back to your normal kernel, you can use the previously installed crash
+kernel in conjunction with the previously installed kernel-debuginfo to
+perform postmortem analysis:
+
+    # crash /usr/lib/debug/lib/modules/2.6.17-1.2621.el5/vmlinux
+    /var/crash/2006-08-23-15:34/vmcore
+
+    crash> bt
+
+and so on...
+
+
+Dump Triggering methods:
+
+This section talks about the various ways, other than a Kernel Panic, in which
+Kdump can be triggered. The following methods assume that Kdump is configured
+on your system, with the scripts enabled as described in the section above.
+
+1) AltSysRq C
+
+Kdump can be triggered with the combination of the 'Alt','SysRq' and 'C'
+keyboard keys. Please refer to the following link for more details:
+
+http://kbase.redhat.com/faq/FAQ_43_5559.shtm
+
+In addition, on PowerPC boxes, Kdump can also be triggered via Hardware
+Management Console(HMC) using 'Ctrl', 'O' and 'C' keyboard keys.
+
+2) NMI_WATCHDOG
+
+In case a machine has a hard hang, it is quite possible that it does not
+respond to keyboard interrupts. As a result 'Alt-SysRq' keys will not help
+trigger a dump. In such scenarios Nmi Watchdog feature can prove to be useful.
+The following link has more details on configuring Nmi watchdog option.
+
+http://kbase.redhat.com/faq/FAQ_85_9129.shtm
+
+Once this feature has been enabled in the kernel, any lockups will result in an
+OOPs message to be generated, followed by Kdump being triggered.
+
+3) Kernel OOPs
+
+If we want to generate a dump everytime the Kernel OOPses, we can achieve this
+by setting the 'Panic On OOPs' option as follows:
+
+    # echo 1 > /proc/sys/kernel/panic_on_oops
+
+This is enabled by default on RHEL5.
+
+4) NMI(Non maskable interrupt) button
+
+In cases where the system is in a hung state, and is not accepting keyboard
+interrupts, using NMI button for triggering Kdump can be very useful. NMI
+button is present on most of the newer x86 and x86_64 machines. Please refer
+to the User guides/manuals to locate the button, though in most occasions it
+is not very well documented. In most cases it is hidden behind a small hole
+on the front or back panel of the machine. You could use a toothpick or some
+other non-conducting probe to press the button.
+
+For example, on the IBM X series 366 machine, the NMI button is located behind
+a small hole on the bottom center of the rear panel.
+
+To enable this method of dump triggering using NMI button, you will need to set
+the 'unknown_nmi_panic' option as follows:
+
+   # echo 1 > /proc/sys/kernel/unknown_nmi_panic
+
+5) PowerPC specific methods:
+
+On IBM PowerPC machines, issuing a soft reset invokes the XMON debugger(if
+XMON is configured). To configure XMON one needs to compile the kernel with
+the CONFIG_XMON and CONFIG_XMON_DEFAULT options, or by compiling with
+CONFIG_XMON and booting the kernel with xmon=on option.
+
+Following are the ways to remotely issue a soft reset on PowerPC boxes, which
+would drop you to XMON. Pressing a 'X' (capital alphabet X) followed by an
+'Enter' here will trigger the dump.
+
+5.1) HMC
+
+Hardware Management Console(HMC) available on Power4 and Power5 machines allow
+partitions to be reset remotely. This is specially useful in hang situations
+where the system is not accepting any keyboard inputs.
+
+Once you have HMC configured, the following steps will enable you to trigger
+Kdump via a soft reset:
+
+On Power4
+  Using GUI
+
+    * In the right pane, right click on the partition you wish to dump.
+    * Select "Operating System->Reset".
+    * Select "Soft Reset".
+    * Select "Yes".
+
+  Using HMC Commandline
+
+    # reset_partition -m <machine> -p <partition> -t soft
+
+On Power5
+  Using GUI
+
+    * In the right pane, right click on the partition you wish to dump.
+    * Select "Restart Partition".
+    * Select "Dump".
+    * Select "OK".
+
+  Using HMC Commandline
+
+    # chsysstate -m <managed system name> -n <lpar name> -o dumprestart -r lpar
+
+5.2) Blade Management Console for Blade Center
+
+To initiate a dump operation, go to Power/Restart option under "Blade Tasks" in
+the Blade Management Console. Select the corresponding blade for which you want
+to initate the dump and then click "Restart blade with NMI". This issues a
+system reset and invokes xmon debugger.
+
+
+Advanced Setups:
+
+In addition to being able to capture a vmcore to your system's local file
+system, kdump can be configured to capture a vmcore to a number of other
+locations, including a raw disk partition, a dedicated file system, an NFS
+mounted file system, or a remote system via ssh/scp. Additional options
+exist for specifying the relative path under which the dump is captured,
+what to do if the capture fails, and for compressing and filtering the dump
+(so as to produce smaller, more manageable, vmcore files).
+
+In theory, dumping to a location other than the local file system should be
+safer than kdump's default setup, as its possible the default setup will try
+dumping to a file system that has become corrupted. The raw disk partition and
+dedicated file system options allow you to still dump to the local system,
+but without having to remount your possibly corrupted file system(s),
+thereby decreasing the chance a vmcore won't be captured. Dumping to an
+NFS server or remote system via ssh/scp also has this advantage, as well
+as allowing for the centralization of vmcore files, should you have several
+systems from which you'd like to obtain vmcore files. Of course, note that
+these configurations could present problems if your network is unreliable.
+
+Advanced setups are configured via modifications to /etc/kdump.conf,
+which out of the box, is fairly well documented itself. Any alterations to
+/etc/kdump.conf should be followed by a restart of the kdump service, so
+the changes can be incorporated in the kdump initrd. Restarting the kdump
+service is as simple as '/sbin/service kdump restart'.
+
+
+Note that kdump.conf is used as a configuration mechanism for capturing dump
+files from the initramfs (in the interests of safety), the root file system is
+mounted, and the init process is started, only as a last resort if the
+initramfs fails to capture the vmcore.  As such, configuration made in
+/etc/kdump.conf is only applicable to capture recorded in the initramfs.  If
+for any reason the init process is started on the root file system, only a
+simple copying of the vmcore from /proc/vmcore to /var/crash/$DATE/vmcore will
+be preformed.
+
+Raw partition
+
+Raw partition dumping requires that a disk partition in the system, at least
+as large as the amount of memory in the system, be left unformatted. Assuming
+/dev/sda5 is left unformatted, kdump.conf can be configured with 'raw
+/dev/sda5', and the vmcore file will be copied via dd directly onto partition
+/dev/sda5. Restart the kdump service via '/sbin/service kdump restart'
+to commit this change to your kdump initrd.
+
+Dedicated file system
+
+Similar to raw partition dumping, you can format a partition with the file
+system of your choice, leaving it unmounted during normal operation. Again,
+it should be at least as large as the amount of memory in the system. Assuming
+/dev/sda3 has been formatted ext4, specify 'ext4 /dev/sda3' in kdump.conf,
+and a vmcore file will be copied onto the file system after it has been
+mounted. Dumping to a dedicated partition has the advantage that you can dump
+multiple vmcores to the file system, space permitting, without overwriting
+previous ones, as would be the case in a raw partition setup. Restart the
+kdump service via '/sbin/service kdump restart' to commit this change to
+your kdump initrd.  Note that for local file systems ext4 and ext2 are
+supported as dumpable targets.  Kdump will not prevent you from specifying
+other filesystems, and they will most likely work, but their operation
+cannot be guaranteed.  for instance specifying a vfat filesystem or msdos
+filesystem will result in a successful load of the kdump service, but during
+crash recovery, the dump will fail if the system has more than 2GB of memory
+(since vfat and msdos filesystems do not support more than 2GB files).
+Be careful of your filesystem selection when using this target.
+
+NFS mount
+
+Dumping over NFS requires an NFS server configured to export a file system
+with full read/write access for the root user. All operations done within
+the kdump initial ramdisk are done as root, and to write out a vmcore file,
+we obviously must be able to write to the NFS mount. Configuring an NFS
+server is outside the scope of this document, but either the no_root_squash
+or anonuid options on the NFS server side are likely of interest to permit
+the kdump initrd operations write to the NFS mount as root.
+
+Assuming your're exporting /dump on the machine nfs-server.example.com,
+once the mount is properly configured, specify it in kdump.conf, via 'net
+nfs-server.example.com:/dump'. The server portion can be specified either
+by host name or IP address. Note that if a host name is used, it should be a
+fully qualified domain name. Following a system crash, the kdump initrd will
+mount the NFS mount and copy out the vmcore to your NFS server. Restart the
+kdump service via '/sbin/service kdump restart' to commit this change to
+your kdump initrd.
+
+Remote system via ssh/scp
+
+Dumping over ssh/scp requires setting up passwordless ssh keys for every
+machine you wish to have dump via this method. First up, configure kdump.conf
+for ssh/scp dumping, adding a config line of 'net user@server', where 'user'
+can be any user on the target system you choose, and 'server' is the host
+name or IP address of the target system. Using a dedicated, restricted user
+account on the target system is recommended, as there will be keyless ssh
+access to this account. Note that the fully qualified domain name of the
+server should also be used in this configuration.
+
+Once kdump.conf is appropriately configured, issue the command '/sbin/service
+kdump propagate' to automatically set up the ssh host keys and transmit
+the necessary bits to the target server. You'll have to type in 'yes'
+to accept the host key for your targer server if this is the first time
+you've connected to it, and then input the target system user's password
+to send over the necessary ssh key file. Restart the kdump service via
+'/sbin/service kdump restart' to commit this change to your kdump initrd.
+
+Path
+
+By default, local file system vmcore files are written to /var/crash/%DATE
+on the local system, ssh/scp dumps to /var/crash/%HOST-%DATE on the target
+system, dedicated file system partition dumps to ./var/crash/%DATE, and
+NFS dumps to ./var/crash/%HOST-%DATE, the latter two both relative to
+their respective mount points within the kdump initrd (usually /mnt). The
+'/var/crash' portion of the path can be overridden using kdump.conf's 'path'
+variable, should you wish to write the vmcore out to a different location. For
+example, 'path /data/coredumps' would lead to vmcore files being written to
+/data/coredumps/%DATE if you were dumping to your local file system.  Note
+that the path option is ingnored if your kdump configuration results in the
+core being saved from the initscripts in the root filesystem.
+
+Kdump Post-Capture Executable
+
+It is possible to specify a custom script or binary you wish to run following 
+an attempt to capture a vmcore. The executable is passed an exit code from 
+the capture process, which can be used to trigger different actions from
+within your post-capture executable.
+
+Extra Binaries
+
+If you have specific binaries or scripts you want to have made available
+within your kdump initrd, you can specify them by their full path, and they
+will be included in your kdump initrd, along with all dependent libraries.
+This may be particularly useful for those running post-capture scripts that
+rely on other binaries.
+
+Extra Modules
+
+By default, only the bare minimum of kernel modules will be included in your
+kdump initrd. Should you wish to capture your vmcore files to a non-boot-path
+storage device, such as an iscsi target disk or clustered file system, you may
+need to manually specify additional kernel modules to load into your kdump
+initrd.
+
+Default action
+
+By default, if a configured dump method fails, the kdump initrd falls back
+to trying to dump to the local file system (i.e., into the file system(s)
+you would have mounted under normal system operation). The system always
+reboots following an attempted dump to your local file system, regardless
+of success or failure.
+
+However, for any of the advanced methods, if the dump fails, you can configure
+the kdump initrd to skip trying to dump to the local file system, instead
+immediately rebooting ('default reboot'), halting the system ('default halt') 
+or dropping you to a shell within the initrd ('default shell'), from which you 
+could try to capture the vmcore manually. Again, if the 'default' parameter is 
+unset, a local file system dump will be attempted, then the system will reboot.
+
+Compression and filtering
+
+The 'core_collector' parameter in kdump.conf allows you to specify a custom
+dump capture method. The most common alternate method is makedumpfile, which
+is a dump filtering and compression utility provided with kexec-tools. On
+some architectures, it can drastically reduce the size of your vmcore files,
+which becomes very useful on systems with large amounts of memory.
+
+A typical setup is 'core_collector makedumpfile -c', but check the output of
+'/sbin/makedumpfile --help' for a list of all available options (-i and -g
+don't need to be specified, they're automatically taken care of). Note that
+use of makedumpfile requires that the kernel-debuginfo package corresponding
+with your running kernel be installed.
+
+If you use other command as a 'core_collector', probably you also need to
+specify its full path in 'extra_bins' by hand.
+
+Also note that makedumpfile is only used from the initramfs.  Saving a
+core from the initscript in the root filesystem is considered a last ditch
+effort, only used when the initramfs has failed to save the core properly.
+As such only the cp utiltiy is used in the initscripts.  The implication
+here is that in order to use makedumpfile as your core collector, you must
+specify a dump target in /etc/kdump.conf.
+
+Caveats:
+
+Console frame-buffers and X are not properly supported. If you typically run
+with something along the lines of "vga=791" in your kernel config line or
+have X running, console video will be garbled when a kernel is booted via
+kexec. Note that the kdump kernel should still be able to create a dump,
+and when the system reboots, video should be restored to normal.
+
+
+Notes on resetting video:
+
+Video is a notoriously difficult issue with kexec.  Video cards contain ROM code
+that controls their initial configuration and setup.  This code is nominally
+accessed and executed from the Bios, and otherwise not safely executable. Since
+the purpose of kexec is to reboot the system without re-executing the Bios, it
+is rather difficult if not impossible to reset video cards with kexec.  The
+result is, that if a system crashes while running in a graphical mode (i.e.
+running X), the screen may appear to become 'frozen' while the dump capture is
+taking place.  A serial console will of course reveal that the system is
+operating and capturing a vmcore image, but a casual observer will see the
+system as hung until the dump completes and a true reboot is executed.
+
+There are two possiblilties to work around this issue.  One is by adding
+--reset-vga to the kexec command line options in /etc/sysconfig/kdump.  This
+tells kdump to write some reasonable default values to the video card register
+file, in the hopes of returning it to a text mode such that boot messages are
+visible on the screen.  It does not work with all video cards however.
+Secondly, it may be worth trying to add vga15fb.ko to the extra_modules list in
+/etc/kdump.conf.  This will attempt to use the video card in framebuffer mode,
+which can blank the screen prior to the start of a dump capture.

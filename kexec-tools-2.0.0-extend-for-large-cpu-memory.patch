@@ -1,0 +1,66 @@
+diff -rup kexec-tools-2.0.0.orig/kexec/arch/i386/kexec-x86.h kexec-tools-2.0.0/kexec/arch/i386/kexec-x86.h
+--- kexec-tools-2.0.0.orig/kexec/arch/i386/kexec-x86.h	2010-08-11 05:56:30.175760987 -0400
++++ kexec-tools-2.0.0/kexec/arch/i386/kexec-x86.h	2010-08-11 05:57:13.732762381 -0400
+@@ -1,7 +1,7 @@
+ #ifndef KEXEC_X86_H
+ #define KEXEC_X86_H
+ 
+-#define MAX_MEMORY_RANGES 64
++#define MAX_MEMORY_RANGES 1024
+ 
+ enum coretype {
+ 	CORE_TYPE_UNDEF = 0,
+diff -rup kexec-tools-2.0.0.orig/kexec/arch/x86_64/crashdump-x86_64.c kexec-tools-2.0.0/kexec/arch/x86_64/crashdump-x86_64.c
+--- kexec-tools-2.0.0.orig/kexec/arch/x86_64/crashdump-x86_64.c	2010-08-11 05:56:30.170761589 -0400
++++ kexec-tools-2.0.0/kexec/arch/x86_64/crashdump-x86_64.c	2010-08-11 05:57:13.735760402 -0400
+@@ -587,7 +587,7 @@ int load_crashdump_segments(struct kexec
+ 				unsigned long max_addr, unsigned long min_base)
+ {
+ 	void *tmp;
+-	unsigned long sz, elfcorehdr;
++	unsigned long sz, bufsz, memsz, elfcorehdr;
+ 	int nr_ranges, align = 1024, i;
+ 	struct memory_range *mem_range, *memmap_p;
+ 
+@@ -620,9 +620,10 @@ int load_crashdump_segments(struct kexec
+ 	/* Create elf header segment and store crash image data. */
+ 	if (crash_create_elf64_headers(info, &elf_info,
+ 				       crash_memory_range, nr_ranges,
+-				       &tmp, &sz,
++				       &tmp, &bufsz,
+ 				       ELF_CORE_HEADER_ALIGN) < 0)
+ 		return -1;
++	/* the size of the elf headers allocated is returned in 'bufsz' */
+ 
+ 	/* Hack: With some ld versions (GNU ld version 2.14.90.0.4 20030523),
+ 	 * vmlinux program headers show a gap of two pages between bss segment
+@@ -631,9 +632,15 @@ int load_crashdump_segments(struct kexec
+ 	 * elf core header segment to 16K to avoid being placed in such gaps.
+ 	 * This is a makeshift solution until it is fixed in kernel.
+ 	 */
+-	elfcorehdr = add_buffer(info, tmp, sz, 16*1024, align, min_base,
++	if (bufsz < (16*1024))
++		/* bufsize is big enough for all the PT_NOTE's and PT_LOAD's */
++		memsz = 16*1024;
++		/* memsz will be the size of the memory hole we look for */
++	else
++		memsz = bufsz;
++	elfcorehdr = add_buffer(info, tmp, bufsz, memsz, align, min_base,
+ 							max_addr, -1);
+-	if (delete_memmap(memmap_p, elfcorehdr, sz) < 0)
++	if (delete_memmap(memmap_p, elfcorehdr, memsz) < 0)
+ 		return -1;
+ 	cmdline_add_memmap(mod_cmdline, memmap_p);
+ 	cmdline_add_elfcorehdr(mod_cmdline, elfcorehdr);
+diff -rup kexec-tools-2.0.0.orig/kexec/firmware_memmap.c kexec-tools-2.0.0/kexec/firmware_memmap.c
+--- kexec-tools-2.0.0.orig/kexec/firmware_memmap.c	2010-08-11 05:56:30.132760870 -0400
++++ kexec-tools-2.0.0/kexec/firmware_memmap.c	2010-08-11 05:57:13.737761239 -0400
+@@ -154,6 +154,8 @@ static int parse_memmap_entry(const char
+ 		range->type = RANGE_RAM;
+ 	else if (strcmp(type, "ACPI Tables") == 0)
+ 		range->type = RANGE_ACPI;
++	else if (strcmp(type, "Unusable memory") == 0)
++		range->type = RANGE_RESERVED;
+ 	else if (strcmp(type, "reserved") == 0)
+ 		range->type = RANGE_RESERVED;
+ 	else if (strcmp(type, "ACPI Non-volatile Storage") == 0)

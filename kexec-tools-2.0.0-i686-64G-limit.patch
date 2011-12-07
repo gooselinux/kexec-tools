@@ -1,0 +1,19 @@
+diff -Nrup kexec-tools-2.0.0.orig/kexec/arch/i386/crashdump-x86.c kexec-tools-2.0.0/kexec/arch/i386/crashdump-x86.c
+--- kexec-tools-2.0.0.orig/kexec/arch/i386/crashdump-x86.c	2010-06-11 12:36:15.000000000 +0800
++++ kexec-tools-2.0.0/kexec/arch/i386/crashdump-x86.c	2010-06-11 12:36:53.000000000 +0800
+@@ -111,6 +111,15 @@ static int get_crash_memory_ranges(struc
+ 		if (start >= 0x00000000 && end <= 0x0009ffff)
+ 			continue;
+ 
++		/*
++		 *  Exclude any segments starting at or beyond 64GB, and
++		 *  restrict any segments from ending at or beyond 64GB.
++		 */
++		if (start >= 0x1000000000)
++			continue;
++		if (end >= 0x1000000000)
++			end = 0xfffffffff;
++
+ 		crash_memory_range[memory_ranges].start = start;
+ 		crash_memory_range[memory_ranges].end = end;
+ 		crash_memory_range[memory_ranges].type = type;

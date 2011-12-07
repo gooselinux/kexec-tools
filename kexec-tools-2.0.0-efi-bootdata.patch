@@ -1,0 +1,74 @@
+diff -up kexec-tools-2.0.0/include/x86/x86-linux.h.orig kexec-tools-2.0.0/include/x86/x86-linux.h
+--- kexec-tools-2.0.0/include/x86/x86-linux.h.orig	2008-07-14 07:28:19.000000000 -0400
++++ kexec-tools-2.0.0/include/x86/x86-linux.h	2010-08-04 12:14:51.000000000 -0400
+@@ -27,7 +27,7 @@ struct drive_info_struct {
+ };
+ struct sys_desc_table {
+ 	uint16_t length;
+-	uint8_t  table[318];
++	uint8_t  table[14];
+ };
+ 
+ struct apm_bios_info {
+@@ -67,6 +67,17 @@ struct edd_info {
+ 	uint8_t  edd_device_params[EDD_DEVICE_PARAM_SIZE];
+ } __attribute__ ((packed));
+ 
++struct efi_info {
++	uint32_t efi_loader_signature;
++	uint32_t efi_systab;
++	uint32_t efi_memdesc_size;
++	uint32_t efi_memdesc_version;
++	uint32_t efi_memmap;
++	uint32_t efi_memmap_size;
++	uint32_t efi_systab_hi;
++	uint32_t efi_memmap_hi;
++};
++
+ struct x86_linux_param_header {
+ 	uint8_t  orig_x;			/* 0x00 */
+ 	uint8_t  orig_y;			/* 0x01 */
+@@ -107,6 +118,9 @@ struct x86_linux_param_header {
+ 	struct apm_bios_info apm_bios_info;	/* 0x40 */
+ 	struct drive_info_struct drive_info;	/* 0x80 */
+ 	struct sys_desc_table sys_desc_table;	/* 0xa0 */
++	uint8_t _pad4[144];			/* 0x0b0 */
++	uint8_t _pad5[128];			/* 0x140  - edid_data*/
++	struct efi_info efi_info;		/* 0x1c0 */
+ 	uint32_t alt_mem_k;			/* 0x1e0 */
+ 	uint8_t  reserved5[4];			/* 0x1e4 */
+ 	uint8_t  e820_map_nr;			/* 0x1e8 */
+diff -up kexec-tools-2.0.0/kexec/arch/i386/x86-linux-setup.c.orig kexec-tools-2.0.0/kexec/arch/i386/x86-linux-setup.c
+--- kexec-tools-2.0.0/kexec/arch/i386/x86-linux-setup.c.orig	2008-07-14 07:28:19.000000000 -0400
++++ kexec-tools-2.0.0/kexec/arch/i386/x86-linux-setup.c	2010-08-04 12:15:34.000000000 -0400
+@@ -403,7 +403,8 @@ void setup_linux_system_parameters(struc
+ 	/* Fill in information the BIOS would usually provide */
+ 	struct memory_range *range;
+ 	int i, ranges;
+-	
++	int boot_param_fd;
++
+ 	/* Default screen size */
+ 	real_mode->orig_x = 0;
+ 	real_mode->orig_y = 0;
+@@ -428,6 +429,20 @@ void setup_linux_system_parameters(struc
+ 	/* Default sysdesc table */
+ 	real_mode->sys_desc_table.length = 0;
+ 
++	memset(&real_mode->efi_info, 0, sizeof(struct efi_info));
++	/* check to see if we're running an EFI firmware here */
++	boot_param_fd = open("/sys/kernel/debug/boot_params/data", O_RDONLY);
++	if (boot_param_fd > 0) {
++		int rc;
++		lseek(boot_param_fd, 0x1c0, SEEK_SET);
++		rc  = read(boot_param_fd, &real_mode->efi_info,
++			sizeof(struct efi_info));
++		if (rc != sizeof(struct efi_info))
++			printf("ERROR READING EFI INFO\n");
++		close(boot_param_fd);	
++	} else
++		printf("UNABLE TO GATHER EFI DATA\n");
++	
+ 	/* default yes: this can be overridden on the command line */
+ 	real_mode->mount_root_rdonly = 0xFFFF;
+ 

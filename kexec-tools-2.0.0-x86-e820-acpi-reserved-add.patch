@@ -1,0 +1,233 @@
+diff -up kexec-tools-2.0.0/kexec/arch/i386/crashdump-x86.c.orig kexec-tools-2.0.0/kexec/arch/i386/crashdump-x86.c
+--- kexec-tools-2.0.0/kexec/arch/i386/crashdump-x86.c.orig	2010-07-09 09:40:38.330795854 -0400
++++ kexec-tools-2.0.0/kexec/arch/i386/crashdump-x86.c	2010-07-09 10:39:55.254371527 -0400
+@@ -72,12 +72,14 @@ static int get_crash_memory_ranges(struc
+ 		return -1;
+ 	}
+ 
++#if 0
+ 	/* First entry is for first 640K region. Different bios report first
+ 	 * 640K in different manner hence hardcoding it */
+ 	crash_memory_range[0].start = 0x00000000;
+ 	crash_memory_range[0].end = 0x0009ffff;
+ 	crash_memory_range[0].type = RANGE_RAM;
+ 	memory_ranges++;
++#endif
+ 
+ 	while(fgets(line, sizeof(line), fp) != 0) {
+ 		char *str;
+@@ -103,14 +105,27 @@ static int get_crash_memory_ranges(struc
+ 				crash_reserved_mem.end = end;
+ 				crash_reserved_mem.type = RANGE_RAM;
+ 				continue;
++		} else if (memcmp(str, "ACPI Tables\n", 12) == 0) {
++			/*
++			 * ACPI Tables area need to be passed to new
++			 * kernel with appropriate memmap= option. This
++			 * is needed so that x86_64 kernel creates linear
++			 * mapping for this region which is required for
++			 * initializing acpi tables in second kernel.
++			 */
++			type = RANGE_ACPI;
++		} else if (memcmp(str, "reserved\n", 9) == 0){
++			type = RANGE_RESERVED;
++		} else if(memcmp(str,"ACPI Non-volatile Storage\n",26) == 0 ) {
++			type = RANGE_ACPI_NVS;	
+ 		} else {
+ 			continue;
+ 		}
+-
++#if 0
+ 		/* First 640K already registered */
+ 		if (start >= 0x00000000 && end <= 0x0009ffff)
+ 			continue;
+-
++#endif
+ 		/*
+ 		 *  Exclude any segments starting at or beyond 64GB, and
+ 		 *  restrict any segments from ending at or beyond 64GB.
+@@ -141,7 +156,7 @@ static int get_crash_memory_ranges(struc
+ 		return -1;
+ 	*range = crash_memory_range;
+ 	*ranges = memory_ranges;
+-#if 0
++#if 0 
+ 	int i;
+ 	printf("CRASH MEMORY RANGES\n");
+ 	for(i = 0; i < memory_ranges; i++) {
+@@ -203,7 +218,7 @@ static int exclude_crash_reserve_region(
+ /* Adds a segment from list of memory regions which new kernel can use to
+  * boot. Segment start and end should be aligned to 1K boundary. */
+ static int add_memmap(struct memory_range *memmap_p, unsigned long long addr,
+-								size_t size)
++								size_t size, int type)
+ {
+ 	int i, j, nr_entries = 0, tidx = 0, align = 1024;
+ 	unsigned long long mstart, mend;
+@@ -240,6 +255,7 @@ static int add_memmap(struct memory_rang
+ 			memmap_p[j+1] = memmap_p[j];
+ 		memmap_p[tidx].start = addr;
+ 		memmap_p[tidx].end = addr + size - 1;
++		memmap_p[tidx].type = type;
+ #if 0
+ 	printf("Memmap after adding segment\n");
+ 	for (i = 0; i < CRASH_MAX_MEMMAP_NR;  i++) {
+@@ -366,7 +382,6 @@ static int cmdline_add_memmap(char *cmdl
+ {
+ 	int i, cmdlen, len, min_sizek = 100;
+ 	char str_mmap[256], str_tmp[20];
+-
+ 	/* Exact map */
+ 	strcpy(str_mmap, " memmap=exactmap");
+ 	len = strlen(str_mmap);
+@@ -374,23 +389,33 @@ static int cmdline_add_memmap(char *cmdl
+ 	if (cmdlen > (COMMAND_LINE_SIZE - 1))
+ 		die("Command line overflow\n");
+ 	strcat(cmdline, str_mmap);
+-
+ 	for (i = 0; i < CRASH_MAX_MEMMAP_NR;  i++) {
+ 		unsigned long startk, endk;
++		unsigned long type;
+ 		startk = (memmap_p[i].start/1024);
+ 		endk = ((memmap_p[i].end + 1)/1024);
++		type = memmap_p[i].type;
+ 		if (!startk && !endk)
+ 			/* All regions traversed. */
+ 			break;
+ 
+ 		/* A region is not worth adding if region size < 100K. It eats
+ 		 * up precious command line length. */
++#if 0
+ 		if ((endk - startk) < min_sizek)
+ 			continue;
++#endif
+ 		strcpy (str_mmap, " memmap=");
+ 		ultoa((endk-startk), str_tmp);
+ 		strcat (str_mmap, str_tmp);
+-		strcat (str_mmap, "K@");
++		strcat (str_mmap, "K");
++		if (type == RANGE_ACPI || type == RANGE_ACPI_NVS)
++			strcat (str_mmap, "#");
++		else if (type == RANGE_RESERVED)
++			strcat (str_mmap, "$");
++		else
++			strcat (str_mmap, "@");
++
+ 		ultoa(startk, str_tmp);
+ 		strcat (str_mmap, str_tmp);
+ 		strcat (str_mmap, "K");
+@@ -401,7 +426,7 @@ static int cmdline_add_memmap(char *cmdl
+ 		strcat(cmdline, str_mmap);
+ 	}
+ 
+-#if 0
++#if 0 
+ 		printf("Command line after adding memmap\n");
+ 		printf("%s\n", cmdline);
+ #endif
+@@ -522,6 +547,7 @@ int load_crashdump_segments(struct kexec
+ 	unsigned long sz, elfcorehdr;
+ 	int nr_ranges, align = 1024;
+ 	struct memory_range *mem_range, *memmap_p;
++	int i;
+ 
+ 	if (get_crash_memory_ranges(&mem_range, &nr_ranges) < 0)
+ 		return -1;
+@@ -539,9 +565,19 @@ int load_crashdump_segments(struct kexec
+ 	sz = (sizeof(struct memory_range) * (KEXEC_MAX_SEGMENTS + 1));
+ 	memmap_p = xmalloc(sz);
+ 	memset(memmap_p, 0, sz);
+-	add_memmap(memmap_p, BACKUP_SRC_START, BACKUP_SRC_SIZE);
++	add_memmap(memmap_p, BACKUP_SRC_START, BACKUP_SRC_SIZE, RANGE_RAM);
+ 	sz = crash_reserved_mem.end - crash_reserved_mem.start +1;
+-	add_memmap(memmap_p, crash_reserved_mem.start, sz);
++	add_memmap(memmap_p, crash_reserved_mem.start, sz, RANGE_RAM);
++
++	/*
++	 * Add all the reserved and ACPI sections in mem_range
++	 */
++	for (i=0; i < nr_ranges; i++) {
++		if (mem_range[i].type != RANGE_RAM)
++			add_memmap(memmap_p, mem_range[i].start,
++				   mem_range[i].end-mem_range[i].start+1,
++				   mem_range[i].type);
++	}
+ 
+ 	/* Create a backup region segment to store backup data*/
+ 	sz = (BACKUP_SRC_SIZE + align - 1) & ~(align - 1);
+diff -up kexec-tools-2.0.0/kexec/arch/x86_64/crashdump-x86_64.c.orig kexec-tools-2.0.0/kexec/arch/x86_64/crashdump-x86_64.c
+--- kexec-tools-2.0.0/kexec/arch/x86_64/crashdump-x86_64.c.orig	2010-07-09 09:40:38.355795904 -0400
++++ kexec-tools-2.0.0/kexec/arch/x86_64/crashdump-x86_64.c	2010-07-09 09:55:01.747796635 -0400
+@@ -218,6 +218,8 @@ static int get_crash_memory_ranges(struc
+ 			 * initializing acpi tables in second kernel.
+ 			 */
+ 			type = RANGE_ACPI;
++		} else if (memcmp(str, "reserved\n", 9) == 0){
++			type = RANGE_RESERVED;
+ 		} else if(memcmp(str,"ACPI Non-volatile Storage\n",26) == 0 ) {
+ 			type = RANGE_ACPI_NVS;
+ 		} else if (memcmp(str, "GART\n", 5) == 0) {
+@@ -249,14 +251,15 @@ static int get_crash_memory_ranges(struc
+ 	}
+ 	*range = crash_memory_range;
+ 	*ranges = memory_ranges;
+-#ifdef DEBUG
++#ifdef DEBUG 
++	{
+ 	int i;
+-	printf("CRASH MEMORY RANGES\n");
+ 	for(i = 0; i < memory_ranges; i++) {
+ 		start = crash_memory_range[i].start;
+ 		end = crash_memory_range[i].end;
+ 		printf("%016Lx-%016Lx\n", start, end);
+ 	}
++	}
+ #endif
+ 	return 0;
+ }
+@@ -539,9 +542,9 @@ static int cmdline_add_elfcorehdr(char *
+ 	return 0;
+ }
+ 
+-/* Appends memmap=X#Y commandline for ACPI to command line*/
+-static int cmdline_add_memmap_acpi(char *cmdline, unsigned long start,
+-					unsigned long end)
++/* Appends memmap=X#Y or memmap=X$Y commandline for ACPI/reserved to command line*/
++static int cmdline_add_memmap_type(char *cmdline, unsigned long start,
++					unsigned long end, int type)
+ {
+ 	int cmdlen, len, align = 1024;
+ 	unsigned long startk, endk;
+@@ -555,7 +558,11 @@ static int cmdline_add_memmap_acpi(char 
+ 	strcpy (str_mmap, " memmap=");
+ 	ultoa((endk - startk), str_tmp);
+ 	strcat (str_mmap, str_tmp);
+-	strcat (str_mmap, "K#");
++	strcat (str_mmap, "K");
++	if (type == RANGE_ACPI || type == RANGE_ACPI_NVS)
++		strcat (str_mmap, "#");
++	else
++		strcat (str_mmap, "$");
+ 	ultoa(startk, str_tmp);
+ 	strcat (str_mmap, str_tmp);
+ 	strcat (str_mmap, "K");
+@@ -634,12 +641,13 @@ int load_crashdump_segments(struct kexec
+ 	/* Inform second kernel about the presence of ACPI tables. */
+ 	for (i = 0; i < CRASH_MAX_MEMORY_RANGES; i++) {
+ 		unsigned long start, end;
+-		if ( !( mem_range[i].type == RANGE_ACPI
+-			|| mem_range[i].type == RANGE_ACPI_NVS) )
+-			continue;
+-		start = mem_range[i].start;
+-		end = mem_range[i].end;
+-		cmdline_add_memmap_acpi(mod_cmdline, start, end);
++		if (mem_range[i].type == RANGE_ACPI
++			|| mem_range[i].type == RANGE_ACPI_NVS
++			|| mem_range[i].type == RANGE_RESERVED){
++			start = mem_range[i].start;
++			end = mem_range[i].end;
++			cmdline_add_memmap_type(mod_cmdline, start, end, mem_range[i].type);
++		}
+ 	}
+ 	return 0;
+ }
